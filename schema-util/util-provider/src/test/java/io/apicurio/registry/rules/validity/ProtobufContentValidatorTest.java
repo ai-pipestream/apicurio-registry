@@ -1,15 +1,20 @@
 package io.apicurio.registry.rules.validity;
 
+import com.google.protobuf.DescriptorProtos;
+import io.apicurio.registry.content.ContentHandle;
 import io.apicurio.registry.content.TypedContent;
 import io.apicurio.registry.protobuf.rules.validity.ProtobufContentValidator;
 import io.apicurio.registry.rest.v3.beans.ArtifactReference;
 import io.apicurio.registry.rules.violation.RuleViolationException;
+import io.apicurio.registry.types.ContentTypes;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Tests the Protobuf content validator.
@@ -144,6 +149,52 @@ public class ProtobufContentValidatorTest extends ArtifactUtilProviderTestBase {
                     .version("4.0").name("message4.proto").build());
             validator.validateReferences(content, references);
         });
+    }
+
+    @Test
+    public void testRejectsUnsafeBinaryIdentifier() {
+        DescriptorProtos.DescriptorProto message = DescriptorProtos.DescriptorProto.newBuilder()
+                .setName("User`evil")
+                .build();
+        DescriptorProtos.FileDescriptorProto fileDescriptor = DescriptorProtos.FileDescriptorProto.newBuilder()
+                .setName("malicious.proto")
+                .setPackage("poison")
+                .addMessageType(message)
+                .build();
+
+        String base64Descriptor = Base64.getEncoder().encodeToString(fileDescriptor.toByteArray());
+        TypedContent content = TypedContent.create(ContentHandle.create(base64Descriptor),
+                ContentTypes.APPLICATION_PROTOBUF);
+
+        ProtobufContentValidator validator = new ProtobufContentValidator();
+        RuleViolationException exception = Assertions.assertThrows(RuleViolationException.class,
+                () -> validator.validate(ValidityLevel.SYNTAX_ONLY, content, Collections.emptyMap()));
+        Assertions.assertTrue(exception.getMessage().contains("Unsafe Protobuf identifier"));
+    }
+
+    @Test
+    public void testRejectsConflictingDuplicateFqnAcrossPayload() throws Exception {
+        TypedContent content = TypedContent.create(ContentHandle.create("""
+                syntax = "proto3";
+                package poison;
+                message Thing {
+                  string value = 1;
+                }
+                """), ContentTypes.APPLICATION_PROTOBUF);
+
+        TypedContent conflictingReference = TypedContent.create(ContentHandle.create("""
+                syntax = "proto3";
+                package poison;
+                message Thing {
+                  int32 value = 1;
+                }
+                """), ContentTypes.APPLICATION_PROTOBUF);
+
+        ProtobufContentValidator validator = new ProtobufContentValidator();
+        RuleViolationException exception = Assertions.assertThrows(RuleViolationException.class,
+                () -> validator.validate(ValidityLevel.SYNTAX_ONLY, content,
+                        Map.of("reference.proto", conflictingReference)));
+        Assertions.assertTrue(exception.getMessage().contains("Conflicting Protobuf type definition"));
     }
 
 }

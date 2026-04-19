@@ -1,5 +1,6 @@
 package io.apicurio.registry.protobuf.rules.validity;
 
+import com.google.protobuf.DescriptorProtos;
 import com.squareup.wire.schema.SchemaException;
 import com.squareup.wire.schema.internal.parser.MessageElement;
 import com.squareup.wire.schema.internal.parser.ProtoFileElement;
@@ -13,16 +14,24 @@ import io.apicurio.registry.utils.protobuf.schema.FileDescriptorUtils;
 import io.apicurio.registry.utils.protobuf.schema.ProtobufFile;
 
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
  * A content validator implementation for the Protobuf content type.
  */
 public class ProtobufContentValidator extends AbstractContentValidator {
+
+    private static final Pattern SAFE_IDENTIFIER_PATTERN = Pattern.compile("^[a-zA-Z0-9_]+$");
 
     /**
      * Constructor.
@@ -38,6 +47,7 @@ public class ProtobufContentValidator extends AbstractContentValidator {
                          Map<String, TypedContent> resolvedReferences) throws RuleViolationException {
         if (level == ValidityLevel.SYNTAX_ONLY || level == ValidityLevel.FULL) {
             try {
+                validateSecurity(level, content, resolvedReferences);
                 if (resolvedReferences == null || resolvedReferences.isEmpty()) {
                     // Parse the protobuf content (syntax validation)
                     ProtoFileElement protoFileElement = ProtobufFile
@@ -94,6 +104,9 @@ public class ProtobufContentValidator extends AbstractContentValidator {
                     FileDescriptorUtils.parseProtoFileWithDependencies(mainFile, dependencies, requiredDeps, true, true);
                 }
             }
+            catch (RuleViolationException rve) {
+                throw rve;
+            }
             catch (Exception e) {
                 throw new RuleViolationException("Syntax violation for Protobuf artifact.", RuleType.VALIDITY,
                         level.name(), e);
@@ -122,5 +135,130 @@ public class ProtobufContentValidator extends AbstractContentValidator {
         catch (Exception e) {
             // Do nothing - we don't care if it can't validate. Another rule will handle that.
         }
+    }
+
+    private void validateSecurity(ValidityLevel level, TypedContent content,
+                                  Map<String, TypedContent> resolvedReferences) throws RuleViolationException {
+        Map<String, String> dependencies = resolvedReferences == null ? Collections.emptyMap()
+                : resolvedReferences.entrySet().stream()
+                        .collect(Collectors.toMap(Map.Entry::getKey,
+                                entry -> ProtobufFile
+                                        .toProtoFileElement(entry.getValue().getContent().content()).toSchema()));
+
+        Map<String, TypedContent> descriptorsToValidate = new LinkedHashMap<>();
+        descriptorsToValidate.put("main.proto", content);
+        if (resolvedReferences != null) {
+            descriptorsToValidate.putAll(resolvedReferences);
+        }
+
+        Map<String, byte[]> knownDescriptors = new LinkedHashMap<>();
+        for (Map.Entry<String, TypedContent> schemaEntry : descriptorsToValidate.entrySet()) {
+            DescriptorProtos.FileDescriptorProto descriptorProto = toFileDescriptorProto(schemaEntry.getValue(),
+                    schemaEntry.getKey(), dependencies);
+            walkDescriptorTree(descriptorProto, knownDescriptors, level);
+        }
+    }
+
+    private DescriptorProtos.FileDescriptorProto toFileDescriptorProto(TypedContent content, String fileName,
+            Map<String, String> dependencies) throws Exception {
+        String rawContent = content.getContent().content();
+        try {
+            ProtoFileElement protoFileElement = ProtobufFile.toProtoFileElement(rawContent);
+            return FileDescriptorUtils.toFileDescriptorProto(protoFileElement.toSchema(), fileName,
+                    Optional.ofNullable(protoFileElement.getPackageName()), dependencies);
+        } catch (Exception e) {
+            return DescriptorProtos.FileDescriptorProto.parseFrom(Base64.getDecoder().decode(rawContent));
+        }
+    }
+
+    private void walkDescriptorTree(DescriptorProtos.FileDescriptorProto descriptorProto,
+                                    Map<String, byte[]> knownDescriptors, ValidityLevel level)
+            throws RuleViolationException {
+        String packageName = descriptorProto.getPackage();
+        for (DescriptorProtos.DescriptorProto messageType : descriptorProto.getMessageTypeList()) {
+            walkMessage(messageType, packageName, "", knownDescriptors, level);
+        }
+        for (DescriptorProtos.EnumDescriptorProto enumType : descriptorProto.getEnumTypeList()) {
+            walkEnum(enumType, packageName, "", knownDescriptors, level);
+        }
+        for (DescriptorProtos.ServiceDescriptorProto serviceType : descriptorProto.getServiceList()) {
+            walkService(serviceType, packageName, knownDescriptors, level);
+        }
+    }
+
+    private void walkMessage(DescriptorProtos.DescriptorProto descriptor, String packageName, String scope,
+                             Map<String, byte[]> knownDescriptors, ValidityLevel level)
+            throws RuleViolationException {
+        validateIdentifier(descriptor.getName(), "message", level);
+        String messageScope = scope.isEmpty() ? descriptor.getName() : scope + "." + descriptor.getName();
+        String messageFqn = toFqn(packageName, messageScope);
+        checkForConflictingDefinition(messageFqn, descriptor.toByteArray(), knownDescriptors, level);
+
+        for (DescriptorProtos.FieldDescriptorProto field : descriptor.getFieldList()) {
+            validateIdentifier(field.getName(), "field in " + messageFqn, level);
+        }
+        for (DescriptorProtos.OneofDescriptorProto oneof : descriptor.getOneofDeclList()) {
+            validateIdentifier(oneof.getName(), "oneof in " + messageFqn, level);
+        }
+        for (DescriptorProtos.DescriptorProto nestedMessage : descriptor.getNestedTypeList()) {
+            walkMessage(nestedMessage, packageName, messageScope, knownDescriptors, level);
+        }
+        for (DescriptorProtos.EnumDescriptorProto nestedEnum : descriptor.getEnumTypeList()) {
+            walkEnum(nestedEnum, packageName, messageScope, knownDescriptors, level);
+        }
+    }
+
+    private void walkEnum(DescriptorProtos.EnumDescriptorProto descriptor, String packageName, String scope,
+                          Map<String, byte[]> knownDescriptors, ValidityLevel level)
+            throws RuleViolationException {
+        validateIdentifier(descriptor.getName(), "enum", level);
+        String enumScope = scope.isEmpty() ? descriptor.getName() : scope + "." + descriptor.getName();
+        String enumFqn = toFqn(packageName, enumScope);
+        checkForConflictingDefinition(enumFqn, descriptor.toByteArray(), knownDescriptors, level);
+
+        for (DescriptorProtos.EnumValueDescriptorProto enumValue : descriptor.getValueList()) {
+            validateIdentifier(enumValue.getName(), "enum value in " + enumFqn, level);
+        }
+    }
+
+    private void walkService(DescriptorProtos.ServiceDescriptorProto descriptor, String packageName,
+                             Map<String, byte[]> knownDescriptors, ValidityLevel level)
+            throws RuleViolationException {
+        validateIdentifier(descriptor.getName(), "service", level);
+        String serviceFqn = toFqn(packageName, descriptor.getName());
+        checkForConflictingDefinition(serviceFqn, descriptor.toByteArray(), knownDescriptors, level);
+
+        for (DescriptorProtos.MethodDescriptorProto method : descriptor.getMethodList()) {
+            validateIdentifier(method.getName(), "rpc method in " + serviceFqn, level);
+        }
+    }
+
+    private void validateIdentifier(String identifier, String identifierType, ValidityLevel level)
+            throws RuleViolationException {
+        if (!SAFE_IDENTIFIER_PATTERN.matcher(identifier).matches()) {
+            throw new RuleViolationException(
+                    "Unsafe Protobuf identifier detected (" + identifierType + "): " + identifier,
+                    RuleType.VALIDITY, level.name());
+        }
+    }
+
+    private void checkForConflictingDefinition(String fqn, byte[] descriptorBytes,
+            Map<String, byte[]> knownDescriptors, ValidityLevel level) throws RuleViolationException {
+        byte[] knownBytes = knownDescriptors.get(fqn);
+        if (knownBytes != null && !Arrays.equals(knownBytes, descriptorBytes)) {
+            throw new RuleViolationException("Conflicting Protobuf type definition detected for FQN: " + fqn,
+                    RuleType.VALIDITY, level.name());
+        }
+        knownDescriptors.putIfAbsent(fqn, descriptorBytes);
+    }
+
+    private String toFqn(String packageName, String scopeName) {
+        if (packageName == null || packageName.isEmpty()) {
+            return scopeName;
+        }
+        if (scopeName == null || scopeName.isEmpty()) {
+            return packageName;
+        }
+        return packageName + "." + scopeName;
     }
 }
