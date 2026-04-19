@@ -1,6 +1,8 @@
 package io.apicurio.registry.protobuf.rules.validity;
 
 import com.google.protobuf.DescriptorProtos;
+import com.google.protobuf.Descriptors.DescriptorValidationException;
+import com.google.protobuf.InvalidProtocolBufferException;
 import com.squareup.wire.schema.SchemaException;
 import com.squareup.wire.schema.internal.parser.MessageElement;
 import com.squareup.wire.schema.internal.parser.ProtoFileElement;
@@ -107,7 +109,8 @@ public class ProtobufContentValidator extends AbstractContentValidator {
             catch (RuleViolationException rve) {
                 throw rve;
             }
-            catch (Exception e) {
+            catch (DescriptorValidationException | FileDescriptorUtils.ParseSchemaException
+                    | RuntimeException e) {
                 throw new RuleViolationException("Syntax violation for Protobuf artifact.", RuleType.VALIDITY,
                         level.name(), e);
             }
@@ -132,7 +135,7 @@ public class ProtobufContentValidator extends AbstractContentValidator {
         catch (RuleViolationException rve) {
             throw rve;
         }
-        catch (Exception e) {
+        catch (RuntimeException e) {
             // Do nothing - we don't care if it can't validate. Another rule will handle that.
         }
     }
@@ -162,18 +165,18 @@ public class ProtobufContentValidator extends AbstractContentValidator {
     private DescriptorProtos.FileDescriptorProto toFileDescriptorProto(TypedContent content, String fileName,
             Map<String, String> dependencies) {
         String rawContent = content.getContent().content();
+        ProtoFileElement protoFileElement = ProtobufFile.toProtoFileElement(rawContent);
         try {
-            ProtoFileElement protoFileElement = ProtobufFile.toProtoFileElement(rawContent);
             return FileDescriptorUtils.toFileDescriptorProto(protoFileElement.toSchema(), fileName,
                     Optional.ofNullable(protoFileElement.getPackageName()), dependencies);
-        } catch (Exception e) {
+        } catch (RuntimeException conversionException) {
             try {
                 return DescriptorProtos.FileDescriptorProto.parseFrom(Base64.getDecoder().decode(rawContent));
-            } catch (Exception decodeException) {
+            } catch (IllegalArgumentException | InvalidProtocolBufferException binaryParseException) {
                 RuntimeException runtimeException = new RuntimeException(
                         "Failed to parse Protobuf content as text schema or binary FileDescriptorProto.",
-                        decodeException);
-                runtimeException.addSuppressed(e);
+                        conversionException);
+                runtimeException.addSuppressed(binaryParseException);
                 throw runtimeException;
             }
         }
