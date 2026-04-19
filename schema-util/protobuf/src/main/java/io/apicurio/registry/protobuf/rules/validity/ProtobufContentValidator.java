@@ -170,7 +170,11 @@ public class ProtobufContentValidator extends AbstractContentValidator {
             try {
                 return DescriptorProtos.FileDescriptorProto.parseFrom(Base64.getDecoder().decode(rawContent));
             } catch (Exception decodeException) {
-                throw new RuntimeException(decodeException);
+                RuntimeException runtimeException = new RuntimeException(
+                        "Failed to parse Protobuf content as text schema or binary FileDescriptorProto.",
+                        decodeException);
+                runtimeException.addSuppressed(e);
+                throw runtimeException;
             }
         }
     }
