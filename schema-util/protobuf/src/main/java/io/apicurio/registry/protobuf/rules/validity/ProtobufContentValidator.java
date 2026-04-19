@@ -160,14 +160,18 @@ public class ProtobufContentValidator extends AbstractContentValidator {
     }
 
     private DescriptorProtos.FileDescriptorProto toFileDescriptorProto(TypedContent content, String fileName,
-            Map<String, String> dependencies) throws Exception {
+            Map<String, String> dependencies) {
         String rawContent = content.getContent().content();
         try {
             ProtoFileElement protoFileElement = ProtobufFile.toProtoFileElement(rawContent);
             return FileDescriptorUtils.toFileDescriptorProto(protoFileElement.toSchema(), fileName,
                     Optional.ofNullable(protoFileElement.getPackageName()), dependencies);
         } catch (Exception e) {
-            return DescriptorProtos.FileDescriptorProto.parseFrom(Base64.getDecoder().decode(rawContent));
+            try {
+                return DescriptorProtos.FileDescriptorProto.parseFrom(Base64.getDecoder().decode(rawContent));
+            } catch (Exception decodeException) {
+                throw new RuntimeException(decodeException);
+            }
         }
     }
 
@@ -238,7 +242,7 @@ public class ProtobufContentValidator extends AbstractContentValidator {
         if (!SAFE_IDENTIFIER_PATTERN.matcher(identifier).matches()) {
             throw new RuleViolationException(
                     "Unsafe Protobuf identifier detected (" + identifierType + "): " + identifier,
-                    RuleType.VALIDITY, level.name());
+                    RuleType.VALIDITY, level.name(), (Throwable) null);
         }
     }
 
@@ -247,7 +251,7 @@ public class ProtobufContentValidator extends AbstractContentValidator {
         byte[] knownBytes = knownDescriptors.get(fqn);
         if (knownBytes != null && !Arrays.equals(knownBytes, descriptorBytes)) {
             throw new RuleViolationException("Conflicting Protobuf type definition detected for FQN: " + fqn,
-                    RuleType.VALIDITY, level.name());
+                    RuleType.VALIDITY, level.name(), (Throwable) null);
         }
         knownDescriptors.putIfAbsent(fqn, descriptorBytes);
     }

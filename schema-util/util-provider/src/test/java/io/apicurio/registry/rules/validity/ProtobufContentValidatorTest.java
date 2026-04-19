@@ -14,7 +14,6 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Tests the Protobuf content validator.
@@ -173,27 +172,36 @@ public class ProtobufContentValidatorTest extends ArtifactUtilProviderTestBase {
     }
 
     @Test
-    public void testRejectsConflictingDuplicateFqnAcrossPayload() throws Exception {
-        TypedContent content = TypedContent.create(ContentHandle.create("""
-                syntax = "proto3";
-                package poison;
-                message Thing {
-                  string value = 1;
-                }
-                """), ContentTypes.APPLICATION_PROTOBUF);
+    public void testRejectsConflictingDuplicateFqnAcrossPayload() {
+        DescriptorProtos.DescriptorProto firstMessage = DescriptorProtos.DescriptorProto.newBuilder()
+                .setName("Thing")
+                .addField(DescriptorProtos.FieldDescriptorProto.newBuilder()
+                        .setName("value")
+                        .setNumber(1)
+                        .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING))
+                .build();
+        DescriptorProtos.DescriptorProto secondMessage = DescriptorProtos.DescriptorProto.newBuilder()
+                .setName("Thing")
+                .addField(DescriptorProtos.FieldDescriptorProto.newBuilder()
+                        .setName("value")
+                        .setNumber(1)
+                        .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT32))
+                .build();
 
-        TypedContent conflictingReference = TypedContent.create(ContentHandle.create("""
-                syntax = "proto3";
-                package poison;
-                message Thing {
-                  int32 value = 1;
-                }
-                """), ContentTypes.APPLICATION_PROTOBUF);
+        DescriptorProtos.FileDescriptorProto fileDescriptor = DescriptorProtos.FileDescriptorProto.newBuilder()
+                .setName("conflict.proto")
+                .setPackage("poison")
+                .addMessageType(firstMessage)
+                .addMessageType(secondMessage)
+                .build();
+
+        String base64Descriptor = Base64.getEncoder().encodeToString(fileDescriptor.toByteArray());
+        TypedContent content = TypedContent.create(ContentHandle.create(base64Descriptor),
+                ContentTypes.APPLICATION_PROTOBUF);
 
         ProtobufContentValidator validator = new ProtobufContentValidator();
         RuleViolationException exception = Assertions.assertThrows(RuleViolationException.class,
-                () -> validator.validate(ValidityLevel.SYNTAX_ONLY, content,
-                        Map.of("reference.proto", conflictingReference)));
+                () -> validator.validate(ValidityLevel.SYNTAX_ONLY, content, Collections.emptyMap()));
         Assertions.assertTrue(exception.getMessage().contains("Conflicting Protobuf type definition"));
     }
 
